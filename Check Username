@@ -1,1 +1,546 @@
+# ==============================================================================
+# Copyright (c) 2025 Magog. Tous droits réservés.
+# Ce script est la propriété de Magog. Toute reproduction, modification,
+# distribution ou utilisation non autorisée est strictement interdite.
+# Pour toute question ou demande d'autorisation, contactez Magog.
+# ==============================================================================
 
+import requests
+import itertools
+import time
+import os
+import sys # Import pour sys.stdout.flush
+import base64 # Pour l'obfuscation simple de chaînes de caractères
+
+# --- CONFIGURATION ---
+
+# Caractères à utiliser pour générer les noms d'utilisateur (lettres minuscules et chiffres)
+CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789"
+# USERNAME_LENGTHS sera défini en fonction du choix de l'utilisateur
+
+# Délai en secondes entre chaque vérification.
+# Recommandé à 1 seconde pour un équilibre vitesse/sécurité.
+# Diminuer ce délai augmente la vitesse mais aussi le risque de blocage/bannissement.
+DELAY_SECONDS = 0.33 # Rendu 3 fois plus rapide (était 1 seconde)
+
+# Nombre de tentatives en cas d'erreur réseau
+MAX_RETRIES = 5
+# Délai entre les tentatives de reconnexion (en secondes)
+RETRY_DELAY = 5
+
+# --- FONCTIONS UTILES POUR L'OBFUSCATION ---
+
+def encode_string(s):
+    """Encode une chaîne de caractères en base64 pour une obfuscation simple."""
+    return base64.b64encode(s.encode('utf-8')).decode('utf-8')
+
+def decode_string(s_encoded):
+    """Décode une chaîne de caractères de base64."""
+    return base64.b64decode(s_encoded.encode('utf-8')).decode('utf-8')
+
+# Obfuscation de la signature Magog et de messages clés
+# Ceci est un exemple simple, pas une protection robuste.
+OBFUSCATED_MAGOG_SIGNATURE = encode_string("Magog")
+OBFUSCATED_SCRIPT_START_MESSAGE = encode_string("Début du script de vérification de noms d'utilisateur multi-sites.")
+OBFUSCATED_SCRIPT_END_MESSAGE = encode_string("FIN DE L'EXÉCUTION DU SCRIPT - Signé par ")
+OBFUSCATED_INTERRUPTED_MESSAGE = encode_string("Script interrompu par l'utilisateur (CTRL+C). Progression sauvegardée. Signé par ")
+OBFUSCATED_MAJOR_ERROR_MESSAGE = encode_string("ERREUR MAJEURE : Une erreur inattendue s'est produite lors de l'exécution du script : ")
+
+
+# --- FONCTIONS ---
+
+def generate_all_usernames(lengths_to_generate):
+    """
+    Génère toutes les combinaisons possibles de noms d'utilisateur
+    basées sur CHARACTERS et les longueurs fournies.
+    """
+    print("Génération des noms d'utilisateur...", flush=True)
+    all_usernames = []
+    for length in lengths_to_generate:
+        print(f"  -> Génération de noms d'utilisateur de {length} caractères...", flush=True)
+        for combo in itertools.product(CHARACTERS, repeat=length):
+            all_usernames.append("".join(combo))
+
+    unique_usernames = list(dict.fromkeys(all_usernames)) # S'assurer de l'unicité
+    print(f"Total de {len(unique_usernames)} noms d'utilisateur générés pour vérification.", flush=True)
+    return unique_usernames
+
+def get_start_index(progress_file, all_usernames):
+    """Lit le fichier de progression pour savoir où reprendre."""
+    print(f"Vérification du fichier de progression: {progress_file}", flush=True)
+    if not os.path.exists(progress_file):
+        print("Aucun fichier de progression trouvé. Le script démarre depuis le début.", flush=True)
+        return 0
+
+    try:
+        with open(progress_file, 'r') as f:
+            last_checked = f.read().strip()
+
+        if last_checked in all_usernames:
+            start_index = all_usernames.index(last_checked) + 1
+            print(f"Reprise du script après le nom : '{last_checked}'. (Index: {start_index})", flush=True)
+            return start_index
+        else:
+            print("Le nom dans le fichier de progression est invalide ou non trouvé dans la liste actuelle. Démarrage depuis le début.", flush=True)
+            return 0
+    except Exception as e:
+        print(f"ERREUR lors de la lecture du fichier de progression '{progress_file}' : {e}. Démarrage depuis le début.", flush=True)
+        return 0
+
+def save_progress(progress_file, username):
+    """Enregistre le dernier nom d'utilisateur testé."""
+    try:
+        with open(progress_file, 'w') as f:
+            f.write(username)
+    except IOError as e:
+        print(f"ERREUR: Impossible d'écrire dans le fichier de progression '{progress_file}': {e}", flush=True)
+
+
+def save_valid_username(valid_file, username):
+    """Ajoute un nom d'utilisateur disponible au fichier des résultats."""
+    try:
+        with open(valid_file, 'a') as f:
+            f.write(username + "\n")
+    except IOError as e:
+        print(f"ERREUR: Impossible d'écrire dans le fichier de résultats '{valid_file}': {e}", flush=True)
+
+
+def make_request(url, username, service_name):
+    """Fonction d'aide pour effectuer des requêtes HTTP avec des tentatives."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36'
+    }
+    for retry_count in range(MAX_RETRIES):
+        try:
+            response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+            return response
+        except requests.exceptions.RequestException as e:
+            if retry_count < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                return None
+    return None
+
+def check_patreon_availability(username):
+    """
+    Vérifie si un nom d'utilisateur Patreon est disponible.
+    Retourne True si disponible, False sinon.
+    Patreon redirige vers /home si le nom d'utilisateur n'existe pas.
+    Patreon redirige vers /profile/u=ID si le nom d'utilisateur existe.
+    """
+    url = f"https://www.patreon.com/{username}"
+    response = make_request(url, username, "Patreon")
+    if response is None:
+        return False
+
+    if response.status_code == 200:
+        if "patreon.com/home" in response.url:
+            return True # Nom d'utilisateur disponible
+        elif "patreon.com/profile/u=" in response.url:
+            return False # Nom d'utilisateur pris
+    elif response.status_code == 404:
+        return True
+    return False
+
+def check_tiktok_availability(username):
+    """
+    Vérifie si un nom d'utilisateur TikTok est disponible.
+    Retourne True si disponible, False sinon.
+    TikTok redirige ou affiche un message "Compte introuvable" si le nom d'utilisateur n'existe pas.
+    """
+    url = f"https://www.tiktok.com/@{username}"
+    response = make_request(url, username, "TikTok")
+    if response is None:
+        return False
+
+    response_text = response.text.lower() # Convertir en minuscules pour la recherche
+
+    if response.status_code == 200 and f"@{username.lower()}" in response.url.lower() and "profile" in response.url.lower():
+        return False
+
+    if any(redirect_path in response.url.lower() for redirect_path in ["/foryou", "/discover", "tiktok.com/", "about:blank"]) or response.status_code == 404:
+        if "couldn't find this account" in response_text or \
+           "compte introuvable" in response_text or \
+           "cette page n'est pas disponible" in response_text or \
+           "cette page n'existe pas" in response_text:
+            return True
+        else:
+            return True
+    return False
+
+def check_github_availability(username):
+    """
+    Vérifie si un nom d'utilisateur GitHub est disponible.
+    Retourne True si disponible, False sinon.
+    Sur GitHub, un statut 404 signifie généralement que le nom d'utilisateur est disponible.
+    Un statut 200 avec certains indicateurs signifie qu'il est pris.
+    """
+    url = f"https://github.com/{username}"
+    response = make_request(url, username, "GitHub")
+    if response is None:
+        return False
+
+    response_text = response.text.lower() # Convertir en minuscules pour la recherche
+
+    if response.status_code == 404:
+        return True
+    elif response.status_code == 200:
+        if "follow" in response_text and "repositories" in response_text:
+            return False
+        elif f"@{username.lower()}" in response_text and "contributions" in response_text:
+            return False
+    return False
+
+def check_instagram_availability(username):
+    """
+    Vérifie si un nom d'utilisateur Instagram est disponible.
+    Retourne True si disponible, False sinon.
+    Instagram renvoie 404 ou un texte spécifique comme "Sorry, this page isn't available." si disponible.
+    """
+    url = f"https://www.instagram.com/{username}/"
+    response = make_request(url, username, "Instagram")
+    if response is None:
+        return False
+
+    response_text = response.text.lower()
+
+    if response.status_code == 404:
+        return True
+    elif response.status_code == 200:
+        if "sorry, this page isn't available." in response_text or \
+           "la page que vous avez demandée n'existe pas." in response_text:
+            return True
+        elif f"@{username.lower()}" in response_text and "posts" in response_text and "followers" in response_text:
+            return False
+    return False
+
+def check_x_availability(username):
+    """
+    Vérifie si un nom d'utilisateur X (Twitter) est disponible.
+    Retourne True si disponible, False sinon.
+    X affiche souvent "This account doesn't exist" ou redirige si disponible.
+    """
+    url = f"https://x.com/{username}"
+    response = make_request(url, username, "X (Twitter)")
+    if response is None:
+        return False
+
+    response_text = response.text.lower()
+
+    if response.status_code == 404:
+        return True
+    elif response.status_code == 200:
+        if "this account doesn't exist" in response_text or \
+           "ce compte n'existe pas" in response_text:
+            return True
+        elif "profile_header" in response_text or f"@{username.lower()}" in response_text and "tweets" in response_text:
+            return False
+    return False
+
+def check_reddit_availability(username):
+    """
+    Vérifie si un nom d'utilisateur Reddit est disponible.
+    Retourne True si disponible, False sinon.
+    Reddit renvoie généralement un 404 si l'utilisateur n'existe pas.
+    """
+    url = f"https://www.reddit.com/user/{username}/"
+    response = make_request(url, username, "Reddit")
+    if response is None:
+        return False
+
+    response_text = response.text.lower()
+
+    if response.status_code == 404:
+        return True
+    elif response.status_code == 200:
+        if "user not found" in response_text or \
+           "utilisateur introuvable" in response_text:
+            return True
+        elif f"u/{username.lower()}" in response.url.lower() and "karma" in response_text:
+            return False
+    return False
+
+def check_twitch_availability(username):
+    """
+    Vérifie si un nom d'utilisateur Twitch est disponible.
+    Retourne True si disponible, False sinon.
+    Twitch retourne un 404 ou redirige vers la page d'accueil avec un message
+    "channel not found" ou "Sorry. Unless you’ve got a time machine, that content is unavailable."
+    """
+    url = f"https://www.twitch.tv/{username}"
+    response = make_request(url, username, "Twitch")
+    if response is None:
+        return False
+
+    response_text = response.text.lower()
+
+    if response.status_code == 404:
+        return True # Canal non trouvé -> Disponible
+    elif response.status_code == 200:
+        # Si c'est 200, mais que l'URL est la page d'accueil ou qu'il y a un message d'erreur
+        if "channel not found" in response_text or \
+           "désolé. à moins que vous n'ayez une machine à remonter le temps" in response_text or \
+           "content is unavailable" in response_text or \
+           response.url == "https://www.twitch.tv/": # Redirection vers l'accueil
+            return True # Disponible
+        else:
+            # Si le code est 200 et que le contenu ressemble à un profil réel (followers, vidéos)
+            if "followers" in response_text and "videos" in response_text:
+                return False # Pris
+            # Cas ambigus, par prudence on considère pris
+            return False
+    return False # Autre statut ou échec
+
+
+def check_steam_availability(username):
+    """
+    Checks if a Steam custom URL username is available.
+    Returns True if available (redirects to search with "No results"), False otherwise (200 - profile exists).
+    """
+    url = f"https://steamcommunity.com/id/{username}/"
+    response = make_request(url, username, "Steam")
+    if response is None:
+        return False
+
+    response_text = response.text.lower()
+
+    if response.status_code == 200:
+        # If it redirects to the search page AND contains "no results"
+        if "steamcommunity.com/search/users/" in response.url and "no results matching your search were found" in response_text:
+            return True # Not found on search page -> Available
+        # If it's a 200 on a profile page (e.g., contains profile info)
+        elif "profile_summary" in response_text and "friends" in response_text:
+            return False # Profile exists -> Taken
+        else:
+            # Ambiguous 200 status, treat as taken
+            return False
+    elif response.status_code == 404:
+        # Although uncommon for /id/, a direct 404 might also indicate availability.
+        return True
+    return False # Other status or error
+
+def check_linkedin_availability(username):
+    """
+    Vérifie si un nom d'utilisateur LinkedIn est disponible.
+    ATTENTION : LinkedIn est très strict avec le scraping. Ce check peut être instable.
+    Retourne True si disponible (redirige loin du profil), False sinon.
+    """
+    url = f"https://www.linkedin.com/in/{username}/"
+    response = make_request(url, username, "LinkedIn")
+    if response is None:
+        return False
+
+    # LinkedIn a tendance à rediriger vers la page de connexion ou une page d'erreur
+    # si le profil n'existe pas ou si la requête est suspecte.
+    # Si l'URL finale ne contient pas le nom d'utilisateur dans /in/ ou redirige vers login/join,
+    # c'est probablement disponible ou bloqué.
+    if "linkedin.com/in/" not in response.url or \
+       "linkedin.com/login" in response.url or \
+       "linkedin.com/join" in response.url or \
+       response.status_code == 404: # Rarement 404 direct, mais possible
+        return True # Considéré comme disponible ou inatteignable (donc non pris)
+    elif response.status_code == 200:
+        # Si 200 et que l'URL est bien le profil (contient le username dans /in/)
+        if f"linkedin.com/in/{username.lower()}" in response.url.lower():
+            return False # Pris
+        else:
+            return True # Ambigu, mais si 200 et pas de profil, ça peut être dispo
+    return False
+
+def check_pinterest_availability(username):
+    """
+    Vérifie si un nom d'utilisateur Pinterest est disponible.
+    Retourne True si disponible (404), False sinon (200).
+    """
+    url = f"https://www.pinterest.com/{username}/"
+    response = make_request(url, username, "Pinterest")
+    if response is None:
+        return False
+
+    if response.status_code == 404:
+        return True # Page non trouvée -> Disponible
+    elif response.status_code == 200:
+        # Si la page existe et contient des éléments de profil
+        if "pinboard" in response.text.lower() or "followers" in response.text.lower():
+            return False # Pris
+        else: # Cas ambigu, mais si 200, souvent pris ou erreur côté client
+            return False
+    return False # Autre statut ou échec
+
+
+# --- MAIN SCRIPT ---
+
+def main():
+    # Affichage de "Magog" en grand au début, décodé de la chaîne obfuscated
+    print("\n" + "="*50)
+    print(decode_string(OBFUSCATED_MAGOG_SIGNATURE).center(50))
+    print("="*50 + "\n")
+
+    print(decode_string(OBFUSCATED_SCRIPT_START_MESSAGE), flush=True)
+
+    # Demander à l'utilisateur de choisir la plateforme
+    while True:
+        print("\nChoisissez une plateforme à vérifier :", flush=True)
+        print("1. Patreon")
+        print("2. TikTok")
+        print("3. GitHub")
+        print("4. Instagram")
+        print("5. X (Twitter)")
+        print("6. Reddit")
+        print("7. Twitch")
+        print("8. Steam")
+        print("9. Pinterest")
+        print("10. LinkedIn")
+        platform_choice_num = input("Entrez le numéro de votre choix : ").strip()
+
+        platform_map = {
+            "1": "patreon",
+            "2": "tiktok",
+            "3": "github",
+            "4": "instagram",
+            "5": "x",
+            "6": "reddit",
+            "7": "twitch",
+            "8": "steam",
+            "9": "pinterest",
+            "10": "linkedin"
+        }
+
+        platform_choice = platform_map.get(platform_choice_num)
+
+        if platform_choice:
+            break
+        else:
+            print("Choix invalide. Veuillez entrer un numéro entre 1 et 10.", flush=True)
+
+    # Demander à l'utilisateur de choisir la longueur du nom d'utilisateur
+    chosen_lengths = []
+    while True:
+        print(f"\nChoisissez la longueur des noms d'utilisateur à vérifier pour {platform_choice.capitalize()} :", flush=True)
+        print("1. 3 caractères")
+        print("2. 4 caractères")
+        print("3. Les deux (3 et 4 caractères)")
+        length_choice = input("Entrez le numéro de votre choix : ").strip()
+
+        if length_choice == "1":
+            chosen_lengths = [3]
+            break
+        elif length_choice == "2":
+            chosen_lengths = [4]
+            break
+        elif length_choice == "3":
+            chosen_lengths = [3, 4]
+            break
+        else:
+            print("Choix invalide. Veuillez entrer 1, 2 ou 3.", flush=True)
+
+    # Définir les noms de fichiers en fonction de la plateforme et des longueurs
+    lengths_str = "-".join(map(str, chosen_lengths))
+    VALID_FILE = f"{platform_choice}_valides_{lengths_str}_caracteres.txt"
+    PROGRESS_FILE = f"{platform_choice}_progression_{lengths_str}_caracteres.txt"
+
+    # Mapper le choix de la plateforme à la fonction de vérification correcte
+    check_function = None
+    if platform_choice == "patreon":
+        check_function = check_patreon_availability
+    elif platform_choice == "tiktok":
+        check_function = check_tiktok_availability
+    elif platform_choice == "github":
+        check_function = check_github_availability
+    elif platform_choice == "instagram":
+        check_function = check_instagram_availability
+    elif platform_choice == "x":
+        check_function = check_x_availability
+    elif platform_choice == "reddit":
+        check_function = check_reddit_availability
+    elif platform_choice == "twitch":
+        check_function = check_twitch_availability
+    elif platform_choice == "steam":
+        check_function = check_steam_availability
+    elif platform_choice == "pinterest":
+        check_function = check_pinterest_availability
+    elif platform_choice == "linkedin":
+        check_function = check_linkedin_availability
+
+    try:
+        all_usernames = generate_all_usernames(chosen_lengths) # Passer les longueurs choisies
+        if not all_usernames:
+            print("Le script se termine car aucune combinaison d'utilisateur valide n'a été générée.", flush=True)
+            return
+
+        total_usernames = len(all_usernames)
+        print(f"Total de noms d'utilisateur à vérifier pour {platform_choice.capitalize()} : {total_usernames}", flush=True)
+
+        start_index = get_start_index(PROGRESS_FILE, all_usernames)
+
+        print("\nPour arrêter le script, appuie sur CTRL + C. Ta progression sera sauvegardée.", flush=True)
+        
+        # Paramètres de la barre de progression
+        bar_length = 30 # Longueur de la barre de la barre réinitialisable
+        # Codes ANSI pour la couleur verte (support dépend du terminal)
+        GREEN_START = "\033[92m" # Vert clair
+        RESET_COLOR = "\033[0m" # Réinitialiser la couleur
+        
+        for i in range(start_index, total_usernames):
+            username = all_usernames[i]
+
+            # Calcul de la progression pour la barre réinitialisable (tous les 10)
+            cycle_index = (i - start_index) % 10
+            cycle_progress_pct = (cycle_index + 1) * 10
+            # S'assurer que le pourcentage ne dépasse pas 100% dans le cycle de 10
+            if cycle_progress_pct > 100 or (i - start_index + 1) == 0: # Handle first item in cycle carefully
+                cycle_progress_pct = 0 # Reset to 0 if it wraps around or is the start of a new cycle
+            if cycle_index == 9: # Ensure 100% is hit on the 10th item of the cycle
+                cycle_progress_pct = 100
+            
+            filled_length = int(round(cycle_progress_pct / 100.0 * bar_length))
+            bar_filled = '█' * filled_length
+            bar_empty = ' ' * (bar_length - filled_length)
+            
+            # Caractère rotatif pour l'animation "infinie"
+            spinner_chars = ['|', '/', '-', '\\']
+            spinner = spinner_chars[i % len(spinner_chars)]
+
+            # Calcul du pourcentage de progression totale
+            overall_percentage = ((i + 1) / total_usernames) * 100
+            
+            # Tronquer le nom d'utilisateur pour un affichage plus propre
+            display_username = username[:25] + ('...' if len(username) > 25 else '')
+            
+            # Ligne à afficher pour la progression
+            sys.stdout.write(
+                f"\r{GREEN_START}Progression: [{bar_filled}{RESET_COLOR}{bar_empty}] {cycle_progress_pct}% "
+                f"Total: ({overall_percentage:.1f}%) {spinner} Vérification: {display_username} (Signé par {decode_string(OBFUSCATED_MAGOG_SIGNATURE)}){RESET_COLOR}"
+            )
+            sys.stdout.flush()
+
+            if check_function(username):
+                # Si un nom d'utilisateur disponible est trouvé, l'afficher sur une nouvelle ligne
+                sys.stdout.write(f"\n{GREEN_START}✅ Nom d'utilisateur DISPONIBLE trouvé : {username} (Signé par {decode_string(OBFUSCATED_MAGOG_SIGNATURE)}){RESET_COLOR}\n")
+                sys.stdout.flush()
+                save_valid_username(VALID_FILE, username)
+                
+            save_progress(PROGRESS_FILE, username)
+            time.sleep(DELAY_SECONDS)
+
+        # Affichage final de la barre à 100% à la fin de la vérification totale
+        sys.stdout.write(f"\r{GREEN_START}Progression: [{'█' * bar_length}] 100% Total: (100.0%) (Vérification terminée){RESET_COLOR}\n")
+        sys.stdout.flush()
+
+        print(f"\nLe script a terminé de vérifier tous les noms d'utilisateur pour {platform_choice.capitalize()}.")
+        print("="*50)
+        print(decode_string(OBFUSCATED_SCRIPT_END_MESSAGE).center(50) + decode_string(OBFUSCATED_MAGOG_SIGNATURE).center(50))
+        print("="*50, flush=True)
+
+    except KeyboardInterrupt:
+        print(f"\n\n{decode_string(OBFUSCATED_INTERRUPTED_MESSAGE)}{decode_string(OBFUSCATED_MAGOG_SIGNATURE)}.", flush=True)
+    except Exception as e:
+        print(f"\n\n{decode_string(OBFUSCATED_MAJOR_ERROR_MESSAGE)}{e}. {decode_string(OBFUSCATED_MAGOG_SIGNATURE)}.", flush=True)
+        import traceback
+        traceback.print_exc()
+    finally:
+        print(f"Fin du script. Les noms d'utilisateur valides trouvés sont dans '{VALID_FILE}'.", flush=True)
+        print(f"La dernière progression est sauvegardée dans '{PROGRESS_FILE}'.", flush=True)
+
+if __name__ == "__main__":
+    main()
